@@ -167,8 +167,9 @@ async function captureWithStreamId(streamId: string): Promise<MediaStream> {
 let mediaRecorder: MediaRecorder | null = null
 let chunks: BlobPart[] = []
 let capturing = false
+let currentFilename = ''
 
-async function prepareAndRecord(baseStream: MediaStream): Promise<void> {
+async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: string): Promise<void> {
   const a = baseStream.getAudioTracks()
   const v = baseStream.getVideoTracks()
   log('getUserMedia() tracks:', {
@@ -274,7 +275,7 @@ async function prepareAndRecord(baseStream: MediaStream): Promise<void> {
           suffix = inferSuffixFromActiveTabUrl(tabs[0]?.url || null)
         } catch {}
 
-        const filename = `google-meet-recording-${suffix}-${Date.now()}.webm`
+        const filename = currentFilename || requestedFilename || `google-meet-recording-${suffix}-${Date.now()}.webm`
         const blobUrl = URL.createObjectURL(blob)
         getPort().postMessage({ type: 'OFFSCREEN_SAVE', filename, blobUrl })
       } catch (e) {
@@ -283,6 +284,7 @@ async function prepareAndRecord(baseStream: MediaStream): Promise<void> {
         try { mixedStream.getTracks().forEach(t => t.stop()) } catch {}
         mediaRecorder = null
         chunks = []
+        currentFilename = ''
         capturing = false
         pushState(false)
       }
@@ -303,7 +305,7 @@ async function prepareAndRecord(baseStream: MediaStream): Promise<void> {
 async function startRecordingFromStreamId(streamId: string): Promise<void> {
   if (capturing) { log('Already recording; ignoring start'); return }
   const baseStream = await captureWithStreamId(streamId)
-  await prepareAndRecord(baseStream)
+  await prepareAndRecord(baseStream, currentFilename)
 }
 
 function stopRecording() {
@@ -322,6 +324,7 @@ rpcPort.onMessage.addListener(async (msg: any) => {
       const streamId = msg.streamId as string | undefined
       if (!streamId) return respond(msg, { ok: false, error: 'Missing streamId' })
       try {
+        currentFilename = typeof msg.filename === 'string' ? msg.filename : ''
         // wait until actually starts
         await startRecordingFromStreamId(streamId)
         return respond(msg, { ok: true })
