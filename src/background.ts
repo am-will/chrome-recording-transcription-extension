@@ -172,14 +172,17 @@ function postToOffscreen(msg: any): Promise<any> {
 }
 
 // background side streamId helper
-function getStreamIdForTab(tabId: number): Promise<string> {
+type CaptureSource = 'tab' | 'desktop'
+type CaptureStream = { streamId: string; source: CaptureSource }
+
+function getStreamIdForTab(tabId: number): Promise<CaptureStream> {
   return new Promise((resolve, reject) => {
     try {
       chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id?: string) => {
         const err = chrome.runtime.lastError
         if (err) return reject(new Error(err.message))
         if (!id) return reject(new Error('Empty streamId'))
-        resolve(id)
+        resolve({ streamId: id, source: 'tab' })
       })
     } catch (e) {
       reject(e as any)
@@ -187,7 +190,7 @@ function getStreamIdForTab(tabId: number): Promise<string> {
   })
 }
 
-function chooseDesktopStreamForTab(tabId: number): Promise<string> {
+function chooseDesktopStreamForTab(tabId: number): Promise<CaptureStream> {
   return new Promise((resolve, reject) => {
     chrome.tabs.get(tabId, (tab) => {
       const targetTab = chrome.runtime.lastError ? undefined : tab
@@ -196,7 +199,7 @@ function chooseDesktopStreamForTab(tabId: number): Promise<string> {
           const err = chrome.runtime.lastError
           if (err) return reject(new Error(err.message))
           if (!streamId) return reject(new Error('Capture picker was cancelled'))
-          resolve(streamId)
+          resolve({ streamId, source: 'desktop' })
         }
         if (targetTab) {
           chrome.desktopCapture.chooseDesktopMedia(['tab', 'audio'], targetTab, callback)
@@ -210,7 +213,7 @@ function chooseDesktopStreamForTab(tabId: number): Promise<string> {
   })
 }
 
-async function getStreamIdForRecording(tabId: number): Promise<string> {
+async function getStreamIdForRecording(tabId: number): Promise<CaptureStream> {
   try {
     return await getStreamIdForTab(tabId)
   } catch (e: any) {
@@ -245,10 +248,11 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           : meetSuffixFromUrl(tab?.url)
         const startedAt = typeof msg.startedAt === 'number' ? msg.startedAt : Date.now()
         await chrome.tabs.sendMessage(tabId, { type: 'RESET_TRANSCRIPT' }).catch(() => {})
-        const streamId = await getStreamIdForRecording(tabId)
+        const capture = await getStreamIdForRecording(tabId)
         const r = await postToOffscreen({
           type: 'OFFSCREEN_START',
-          streamId,
+          streamId: capture.streamId,
+          captureSource: capture.source,
           suffix,
           startedAt,
           filename: artifactFilename('recording', suffix, startedAt),

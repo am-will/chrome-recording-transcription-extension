@@ -5,6 +5,7 @@
 // You must "prime" mic permission once from a visible page (popup/options/extension tab)
 // via navigator.mediaDevices.getUserMedia({ audio: true }) before this will succeed.
 const WANT_MIC_MIX = true
+const AUDIO_ONLY_RECORDING = true
 
 window.addEventListener('error', (e) => {
   console.error('[offscreen] window.onerror', e?.message, e?.error)
@@ -124,7 +125,7 @@ function mixAudio(tabStream: MediaStream, micStream: MediaStream | null): MediaS
   }
 
   const final = new MediaStream([
-    ...tabStream.getVideoTracks(),
+    ...(AUDIO_ONLY_RECORDING ? [] : tabStream.getVideoTracks()),
     ...dst.stream.getAudioTracks()
   ])
 
@@ -132,7 +133,6 @@ function mixAudio(tabStream: MediaStream, micStream: MediaStream | null): MediaS
   return final
 }
 
-// build constraints using a streamId. try 'tab' first, then 'desktop'
 function makeConstraints(streamId: string, source: 'tab' | 'desktop'): MediaStreamConstraints {
   const mandatory = { chromeMediaSource: source, chromeMediaSourceId: streamId } as any
   return {
@@ -140,28 +140,20 @@ function makeConstraints(streamId: string, source: 'tab' | 'desktop'): MediaStre
       mandatory,
       optional: [{ googDisableLocalEcho: false }]
     } as any,
-    video: {
+    video: AUDIO_ONLY_RECORDING ? false : ({
       mandatory: {
         ...mandatory,
         maxWidth: 1920,
         maxHeight: 1080,
         maxFrameRate: 30
       }
-    } as any
+    } as any)
   }
 }
 
-// try to record using streamId
-async function captureWithStreamId(streamId: string): Promise<MediaStream> {
-  try {
-    log(`Attempting getUserMedia with streamId ${streamId} source= tab`)
-    const s = await navigator.mediaDevices.getUserMedia(makeConstraints(streamId, 'tab'))
-    return s
-  } catch (e1: any) {
-    log('[gUM] failed for chromeMediaSource=tab:', e1?.name || e1, e1?.message || e1)
-  }
-  log(`Attempting getUserMedia with streamId ${streamId} source= desktop`)
-  return await navigator.mediaDevices.getUserMedia(makeConstraints(streamId, 'desktop'))
+async function captureWithStreamId(streamId: string, source: 'tab' | 'desktop'): Promise<MediaStream> {
+  log(`Attempting getUserMedia with streamId ${streamId} source=${source} mode=${AUDIO_ONLY_RECORDING ? 'audio-only' : 'audio-video'}`)
+  return await navigator.mediaDevices.getUserMedia(makeConstraints(streamId, source))
 }
 
 let mediaRecorder: MediaRecorder | null = null
@@ -189,7 +181,7 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
     T?.addEventListener('mute', () => console.log('[offscreen] track MUTED'))
     T?.addEventListener('unmute', () => console.log('[offscreen] track UNMUTED'))
   }
-  if (!v.length) throw new Error('No video track in captured stream')
+  if (!AUDIO_ONLY_RECORDING && !v.length) throw new Error('No video track in captured stream')
 
   // debug meters
   const rawAudio = baseStream.getAudioTracks()[0]
@@ -228,13 +220,14 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
   }
 
   chunks = []
-  const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
+  const mime = AUDIO_ONLY_RECORDING && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
     ? 'video/webm;codecs=vp8,opus'
     : 'video/webm'
 
   mediaRecorder = new MediaRecorder(mixedStream, {
     mimeType: mime,
-    videoBitsPerSecond: 3_000_000,
     audioBitsPerSecond: 128_000
   })
 
@@ -293,18 +286,18 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
 
   mediaRecorder.start(1000)
 
-  // if tab navigates or video track ends, auto-stop
-  mixedStream.getVideoTracks()[0]?.addEventListener('ended', () => {
-    log('Video track ended')
+  // If the captured tab stream ends, auto-stop.
+  mixedStream.getTracks()[0]?.addEventListener('ended', () => {
+    log('Captured track ended')
     if (mediaRecorder && capturing) { try { mediaRecorder.stop() } catch {} }
   })
 
   await started
 }
 
-async function startRecordingFromStreamId(streamId: string): Promise<void> {
+async function startRecordingFromStreamId(streamId: string, source: 'tab' | 'desktop'): Promise<void> {
   if (capturing) { log('Already recording; ignoring start'); return }
-  const baseStream = await captureWithStreamId(streamId)
+  const baseStream = await captureWithStreamId(streamId, source)
   await prepareAndRecord(baseStream, currentFilename)
 }
 
@@ -325,8 +318,9 @@ rpcPort.onMessage.addListener(async (msg: any) => {
       if (!streamId) return respond(msg, { ok: false, error: 'Missing streamId' })
       try {
         currentFilename = typeof msg.filename === 'string' ? msg.filename : ''
+        const source = msg.captureSource === 'desktop' ? 'desktop' : 'tab'
         // wait until actually starts
-        await startRecordingFromStreamId(streamId)
+        await startRecordingFromStreamId(streamId, source)
         return respond(msg, { ok: true })
       } catch (e: any) {
         return respond(msg, { ok: false, error: `${e?.name || 'Error'}: ${e?.message || e}` })
