@@ -20,6 +20,19 @@ function clearRecordingState(reason: string) {
 
 clearRecordingState('background_loaded')
 
+async function closeOffscreenIfIdle(): Promise<void> {
+  try {
+    if (await hasOffscreenContext()) {
+      await chrome.offscreen.closeDocument()
+    }
+  } catch (e) {
+    bglog('closeOffscreenIfIdle failed/non-fatal:', e)
+  } finally {
+    offscreenPort = null
+    offscreenReady = false
+  }
+}
+
 function meetSuffixFromUrl(url?: string | null): string {
   try {
     if (!url) return 'google-meet'
@@ -143,6 +156,7 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           setTimeout(() => {
             try { offscreenPort?.postMessage({ type: 'REVOKE_BLOB_URL', blobUrl: msg.blobUrl }) } catch {}
+            void closeOffscreenIfIdle()
           }, 10_000)
         })
         return
@@ -202,6 +216,7 @@ async function stopActiveRecording(reason: string, saveTranscript = true): Promi
     }
   } finally {
     clearRecordingState(reason)
+    await closeOffscreenIfIdle()
   }
   return { ok: true }
 }
@@ -299,6 +314,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           activeRecording = { tabId, suffix, startedAt }
           setBadge(true)
           chrome.runtime.sendMessage({ type: 'RECORDING_STATE', recording: true, suffix, startedAt }).catch(() => {})
+          chrome.tabs.sendMessage(tabId, { type: 'RECORDING_STATE', recording: true, suffix, startedAt }).catch(() => {})
           sendResponse({ ok: true, suffix, startedAt })
         } else {
           sendResponse({ ok: false, error: r?.error || 'Failed to start' })

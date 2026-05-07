@@ -138,6 +138,23 @@ new MutationObserver(() => {
       sendResponse({ ok: true })
       return true
     }
+    if (msg?.type === 'RECORDING_STATE') {
+      if (msg.recording) {
+        const suffix = typeof msg.suffix === 'string' ? msg.suffix : meetSuffixFromLocation()
+        const startedAt = typeof msg.startedAt === 'number' ? msg.startedAt : Date.now()
+        if (suffix) {
+          currentRecording = { suffix, startedAt }
+          removePrompt()
+          ensureStopButton()
+        }
+      } else {
+        currentRecording = null
+        stopEl?.remove()
+        stopEl = null
+      }
+      sendResponse({ ok: true })
+      return true
+    }
   })
 
 function removePrompt() {
@@ -247,10 +264,10 @@ function showRecordingPrompt(suffix: string) {
   ].join(';')
 
   const title = document.createElement('div')
-  title.textContent = 'Record this Google Meet?'
+  title.textContent = 'Record this Google Meet'
   title.style.cssText = 'font-weight:600;font-size:14px;margin-bottom:6px'
   const detail = document.createElement('div')
-  detail.textContent = 'The extension will save a local recording and captions for Vexa notes. If Chrome opens a picker, choose this Meet tab and share audio.'
+  detail.textContent = 'Click the extension icon, then Start Recording. Chrome requires the recorder to start from the extension popup.'
   detail.style.cssText = 'line-height:1.35;color:#5f6368;margin-bottom:12px'
 
   const actions = document.createElement('div')
@@ -262,26 +279,11 @@ function showRecordingPrompt(suffix: string) {
   no.addEventListener('click', removePrompt)
 
   const yes = document.createElement('button')
-  yes.textContent = 'Record'
+  yes.textContent = 'Got it'
   yes.type = 'button'
   yes.style.cssText = 'border:0;background:#1a73e8;color:#fff;border-radius:6px;padding:8px 12px;cursor:pointer'
   yes.addEventListener('click', async () => {
-    yes.disabled = true
-    no.disabled = true
-    yes.textContent = 'Starting...'
-    const startedAt = Date.now()
-    ;(window as any).resetTranscript()
-    const resp = await chrome.runtime.sendMessage({ type: 'START_RECORDING', suffix, startedAt }).catch((e) => ({ ok: false, error: String(e) }))
-    if ((resp as any)?.ok) {
-      currentRecording = { suffix, startedAt }
-      removePrompt()
-      ensureStopButton()
-    } else {
-      yes.disabled = false
-      no.disabled = false
-      yes.textContent = 'Record'
-      detail.textContent = `Could not start recording: ${(resp as any)?.error || 'unknown error'}`
-    }
+    removePrompt()
   })
 
   actions.append(no, yes)

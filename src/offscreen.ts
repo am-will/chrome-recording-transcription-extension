@@ -160,6 +160,14 @@ let mediaRecorder: MediaRecorder | null = null
 let chunks: BlobPart[] = []
 let capturing = false
 let currentFilename = ''
+let activeStreams: MediaStream[] = []
+
+function releaseActiveStreams() {
+  for (const stream of activeStreams) {
+    try { stream.getTracks().forEach(t => t.stop()) } catch {}
+  }
+  activeStreams = []
+}
 
 async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: string): Promise<void> {
   const a = baseStream.getAudioTracks()
@@ -189,6 +197,7 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
 
   const micStream = await maybeGetMicStream()
   const mixedStream = mixAudio(baseStream, micStream)
+  activeStreams = [baseStream, ...(micStream ? [micStream] : []), mixedStream]
 
   const finalAudio = mixedStream.getAudioTracks()[0]
   if (finalAudio) attachRmsMeter(finalAudio, 'FINAL')
@@ -245,7 +254,7 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
     mediaRecorder!.onerror = (e: any) => {
       clearTimeout(startTimeout)
       log('MediaRecorder error', e)
-      try { mixedStream.getTracks().forEach(t => t.stop()) } catch {}
+      releaseActiveStreams()
       mediaRecorder = null
       capturing = false
       pushState(false)
@@ -274,7 +283,7 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
       } catch (e) {
         log('Finalize/Save failed', e)
       } finally {
-        try { mixedStream.getTracks().forEach(t => t.stop()) } catch {}
+        releaseActiveStreams()
         mediaRecorder = null
         chunks = []
         currentFilename = ''
@@ -304,6 +313,7 @@ async function startRecordingFromStreamId(streamId: string, source: 'tab' | 'des
 function stopRecording() {
   if (!mediaRecorder || !capturing) {
     console.warn('[offscreen] Stop called but not recording')
+    releaseActiveStreams()
     throw new Error('Not currently recording')
   }
   try { mediaRecorder.stop() } catch (e) { console.error('[offscreen] Stop error', e); throw e }
