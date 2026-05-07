@@ -15,9 +15,69 @@ const lastSeen = new Map<string, string>()
 const captionSelector = '.ygicle'
 const speakerSelector = '.NWpY1d'
 const captionParent = '.nMcdL'
+let reminderEl: HTMLDivElement | null = null
 
 const normalize = (pre: string) =>
   pre.toLowerCase().replace(/[.,?!'"\u2019]/g, "").replace(/\s+/g, " ").trim()
+
+function meetSuffixFromLocation(): string | null {
+  const match = location.pathname.match(/\/([a-z]{3}-[a-z]{4}-[a-z]{3})(?:$|[/?#])/i)
+  return match?.[1] || null
+}
+
+function removeReminder() {
+  reminderEl?.remove()
+  reminderEl = null
+}
+
+function showRecordingReminder(suffix: string) {
+  if (reminderEl) return
+  const key = `vexa-recording-reminder:${suffix}`
+  if (sessionStorage.getItem(key)) return
+  sessionStorage.setItem(key, '1')
+
+  reminderEl = document.createElement('div')
+  reminderEl.style.cssText = [
+    'position:fixed',
+    'right:20px',
+    'top:76px',
+    'z-index:2147483647',
+    'width:310px',
+    'background:#fff',
+    'color:#202124',
+    'border:1px solid rgba(60,64,67,.22)',
+    'border-radius:8px',
+    'box-shadow:0 8px 28px rgba(60,64,67,.28)',
+    'font:13px system-ui,-apple-system,BlinkMacSystemFont,sans-serif',
+    'padding:14px',
+  ].join(';')
+
+  const title = document.createElement('div')
+  title.textContent = 'Start meeting recording?'
+  title.style.cssText = 'font-weight:600;font-size:14px;margin-bottom:6px'
+
+  const detail = document.createElement('div')
+  detail.textContent = 'Click the extension icon, then Start Recording. Turn captions on if you want speaker normalization.'
+  detail.style.cssText = 'line-height:1.35;color:#5f6368;margin-bottom:12px'
+
+  const actions = document.createElement('div')
+  actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px'
+
+  const dismiss = document.createElement('button')
+  dismiss.type = 'button'
+  dismiss.textContent = 'Dismiss'
+  dismiss.style.cssText = 'border:1px solid #dadce0;background:#fff;color:#3c4043;border-radius:6px;padding:8px 10px;cursor:pointer'
+  dismiss.addEventListener('click', removeReminder)
+
+  actions.append(dismiss)
+  reminderEl.append(title, detail, actions)
+  document.documentElement.appendChild(reminderEl)
+}
+
+function checkForMeetReminder() {
+  const suffix = meetSuffixFromLocation()
+  if (suffix) showRecordingReminder(suffix)
+}
 
 function handleCaption(speakerKey: string, speakerName: string, rawText: string) {
   const text = rawText.trim()
@@ -155,6 +215,9 @@ function looksLikePostCallScreen(): boolean {
 setInterval(() => {
   if (looksLikePostCallScreen()) void notifyMeetEnded('meet_post_call_screen_detected')
 }, 1500)
+
+setInterval(checkForMeetReminder, 1500)
+checkForMeetReminder()
 
 window.addEventListener('pagehide', () => {
   void notifyMeetEnded('pagehide')
