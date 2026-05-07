@@ -48,6 +48,32 @@ function artifactFilename(kind: 'recording' | 'transcript', suffix: string, star
   return `vexa-meet-recordings/google-meet-${kind}-${suffix}-${startedAt}.${ext}`
 }
 
+async function pressCaptionsShortcutWithDebugger(tabId: number): Promise<{ ok: boolean; error?: string }> {
+  const target = { tabId }
+  try {
+    await chrome.debugger.attach(target, '1.3')
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'c',
+      code: 'KeyC',
+      windowsVirtualKeyCode: 67,
+      nativeVirtualKeyCode: 67,
+    })
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'c',
+      code: 'KeyC',
+      windowsVirtualKeyCode: 67,
+      nativeVirtualKeyCode: 67,
+    })
+    return { ok: true }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) }
+  } finally {
+    try { await chrome.debugger.detach(target) } catch {}
+  }
+}
+
 async function saveTranscriptForTab(tabId: number, suffix: string, startedAt: number): Promise<{ ok: boolean; filename?: string; error?: string }> {
   try {
     const res = await chrome.tabs.sendMessage(tabId, { type: 'GET_TRANSCRIPT' }).catch((e) => ({ error: String(e) }))
@@ -344,6 +370,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     if (msg?.type === 'GET_RECORDING_STATUS') {
       sendResponse({ recording: lastKnownRecording, activeRecording })
+      return
+    }
+
+    if (msg?.type === 'ENABLE_CAPTIONS_DEBUGGER') {
+      const tabId: number | undefined = msg.tabId ?? _sender.tab?.id ?? activeRecording?.tabId
+      if (typeof tabId !== 'number') { sendResponse({ ok: false, error: 'Missing tabId' }); return }
+      sendResponse(await pressCaptionsShortcutWithDebugger(tabId))
       return
     }
 

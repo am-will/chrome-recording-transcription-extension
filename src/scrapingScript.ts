@@ -80,26 +80,96 @@ function checkForMeetReminder() {
   if (suffix) showRecordingReminder(suffix)
 }
 
-async function enableMeetCaptions() {
-  const controls = Array.from(document.querySelectorAll<HTMLElement>('button,[role="button"]'))
-  const captionsButton = controls.find((el) => {
-    const rect = el.getBoundingClientRect()
-    const style = getComputedStyle(el)
-    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
-    if (!visible) return false
+function visible(el: HTMLElement): boolean {
+  const rect = el.getBoundingClientRect()
+  const style = getComputedStyle(el)
+  return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+}
 
-    const label = [
-      el.getAttribute('aria-label') || '',
-      el.getAttribute('data-tooltip') || '',
-      el.getAttribute('title') || '',
-      el.textContent || '',
-    ].join(' ').toLowerCase()
+function controlLabel(el: HTMLElement): string {
+  return [
+    el.getAttribute('aria-label') || '',
+    el.getAttribute('data-tooltip') || '',
+    el.getAttribute('title') || '',
+    el.textContent || '',
+  ].join(' ').replace(/\s+/g, ' ').trim()
+}
 
-    if (/\b(turn off|disable|hide)\b.*\bcaptions?\b/.test(label)) return false
-    return /\b(turn on|enable|show)\b.*\bcaptions?\b/.test(label) || /\bcaptions?\b.*\b(off|disabled)\b/.test(label)
+function dispatchClickSequence(el: HTMLElement) {
+  const rect = el.getBoundingClientRect()
+  const init: MouseEventInit = {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    clientX: rect.left + rect.width / 2,
+    clientY: rect.top + rect.height / 2,
+    view: window,
+  }
+  el.dispatchEvent(new PointerEvent('pointerdown', { ...init, pointerId: 1, pointerType: 'mouse', isPrimary: true }))
+  el.dispatchEvent(new MouseEvent('mousedown', init))
+  el.dispatchEvent(new PointerEvent('pointerup', { ...init, pointerId: 1, pointerType: 'mouse', isPrimary: true }))
+  el.dispatchEvent(new MouseEvent('mouseup', init))
+  el.dispatchEvent(new MouseEvent('click', init))
+}
+
+function findCaptionsControl(): HTMLElement | null {
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>(
+    [
+      'button',
+      '[role="button"]',
+      '[aria-label*="caption" i]',
+      '[aria-label*="subtitle" i]',
+      '[data-tooltip*="caption" i]',
+      '[data-tooltip*="subtitle" i]',
+      '[title*="caption" i]',
+      '[title*="subtitle" i]',
+    ].join(',')
+  )).filter(visible)
+
+  const scored = candidates.flatMap((el) => {
+    const selfLabel = controlLabel(el)
+    const closestControl = el.closest<HTMLElement>('button,[role="button"]') || el
+    const label = `${selfLabel} ${controlLabel(closestControl)}`.toLowerCase()
+    if (!/\b(captions?|subtitles?)\b/.test(label)) return []
+    if (/\b(turn off|disable|hide)\b.*\b(captions?|subtitles?)\b/.test(label)) return []
+
+    let score = 1
+    if (/\b(turn on|enable|show)\b.*\b(captions?|subtitles?)\b/.test(label)) score += 20
+    if (/\b(captions?|subtitles?)\b.*\b(off|disabled)\b/.test(label)) score += 15
+    if (closestControl !== el) score += 3
+    return [{ el: closestControl, label, score }]
   })
 
-  captionsButton?.click()
+  scored.sort((a, b) => b.score - a.score)
+  return scored[0]?.el || null
+}
+
+async function captionsRegionVisible(): Promise<boolean> {
+  await new Promise(resolve => setTimeout(resolve, 800))
+  return !!document.querySelector('div[role="region"][aria-label="Captions"]')
+}
+
+async function enableMeetCaptions() {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const captionsButton = findCaptionsControl()
+    if (captionsButton) {
+      console.log('[vexa-recorder] enabling captions via control:', controlLabel(captionsButton))
+      dispatchClickSequence(captionsButton)
+      const enabled = await captionsRegionVisible()
+      return enabled
+        ? { ok: true, method: 'control', label: controlLabel(captionsButton) }
+        : { ok: false, error: 'Clicked captions control but captions region did not appear', label: controlLabel(captionsButton) }
+    }
+    await new Promise(resolve => setTimeout(resolve, 500))
+  }
+
+  const labels = Array.from(document.querySelectorAll<HTMLElement>('button,[role="button"],[aria-label],[data-tooltip],[title]'))
+    .filter(visible)
+    .map(controlLabel)
+    .filter(Boolean)
+    .slice(0, 40)
+  console.log('[vexa-recorder] no captions control found. visible controls:', labels)
+  return { ok: false, error: 'No visible captions control found', labels }
 }
 
 function handleCaption(speakerKey: string, speakerName: string, rawText: string) {
@@ -191,8 +261,7 @@ try {
       return true
     }
     if (msg?.type === 'ENABLE_CAPTIONS') {
-      void enableMeetCaptions()
-      sendResponse({ ok: true })
+      void enableMeetCaptions().then(sendResponse)
       return true
     }
     if (msg?.type === 'RECORDING_STATE') {
