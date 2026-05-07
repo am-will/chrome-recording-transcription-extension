@@ -16,6 +16,7 @@ const captionSelector = '.ygicle'
 const speakerSelector = '.NWpY1d'
 const captionParent = '.nMcdL'
 let reminderEl: HTMLDivElement | null = null
+let recordingActive = false
 
 const normalize = (pre: string) =>
   pre.toLowerCase().replace(/[.,?!'"\u2019]/g, "").replace(/\s+/g, " ").trim()
@@ -100,7 +101,6 @@ async function enableMeetCaptions() {
   window.focus()
   ;(document.activeElement as HTMLElement | null)?.blur?.()
   dispatchKeyboardShortcut('c')
-  window.setTimeout(() => dispatchKeyboardShortcut('c', true), 350)
 }
 
 function handleCaption(speakerKey: string, speakerName: string, rawText: string) {
@@ -196,6 +196,12 @@ try {
       sendResponse({ ok: true })
       return true
     }
+    if (msg?.type === 'RECORDING_STATE') {
+      recordingActive = !!msg.recording
+      if (!recordingActive) endedSent = false
+      sendResponse({ ok: true })
+      return true
+    }
     return false
   })
 } catch {
@@ -205,6 +211,7 @@ try {
 let endedSent = false
 
 async function notifyMeetEnded(reason: string) {
+  if (!recordingActive) return
   if (endedSent) return
   endedSent = true
   try {
