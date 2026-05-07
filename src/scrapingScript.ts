@@ -17,6 +17,8 @@ const speakerSelector = '.NWpY1d'
 const captionParent = '.nMcdL'
 let reminderEl: HTMLDivElement | null = null
 let recordingActive = false
+let recordingStartedAt = 0
+let postCallDetections = 0
 
 const normalize = (pre: string) =>
   pre.toLowerCase().replace(/[.,?!'"\u2019]/g, "").replace(/\s+/g, " ").trim()
@@ -198,7 +200,15 @@ try {
     }
     if (msg?.type === 'RECORDING_STATE') {
       recordingActive = !!msg.recording
-      if (!recordingActive) endedSent = false
+      if (recordingActive) {
+        recordingStartedAt = Date.now()
+        postCallDetections = 0
+        endedSent = false
+      } else {
+        recordingStartedAt = 0
+        postCallDetections = 0
+        endedSent = false
+      }
       sendResponse({ ok: true })
       return true
     }
@@ -240,16 +250,26 @@ document.addEventListener('click', (event) => {
 }, true)
 
 function looksLikePostCallScreen(): boolean {
+  if (!recordingActive || Date.now() - recordingStartedAt < 10_000) return false
   const bodyText = (document.body?.innerText || '').toLowerCase()
   if (/\b(you left the meeting|you've left the meeting|you left this meeting|return to home screen)\b/.test(bodyText)) return true
   return Array.from(document.querySelectorAll<HTMLElement>('button,[role="button"]')).some((el) => {
+    const rect = el.getBoundingClientRect()
+    const style = getComputedStyle(el)
+    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+    if (!visible) return false
     const text = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase()
     return /\b(rejoin|join again)\b/.test(text)
   })
 }
 
 setInterval(() => {
-  if (looksLikePostCallScreen()) void notifyMeetEnded('meet_post_call_screen_detected')
+  if (looksLikePostCallScreen()) {
+    postCallDetections += 1
+    if (postCallDetections >= 2) void notifyMeetEnded('meet_post_call_screen_detected')
+  } else {
+    postCallDetections = 0
+  }
 }, 1500)
 
 setInterval(checkForMeetReminder, 1500)
