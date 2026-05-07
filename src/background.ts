@@ -187,6 +187,42 @@ function getStreamIdForTab(tabId: number): Promise<string> {
   })
 }
 
+function chooseDesktopStreamForTab(tabId: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.get(tabId, (tab) => {
+      const targetTab = chrome.runtime.lastError ? undefined : tab
+      try {
+        const callback = (streamId: string) => {
+          const err = chrome.runtime.lastError
+          if (err) return reject(new Error(err.message))
+          if (!streamId) return reject(new Error('Capture picker was cancelled'))
+          resolve(streamId)
+        }
+        if (targetTab) {
+          chrome.desktopCapture.chooseDesktopMedia(['tab', 'audio'], targetTab, callback)
+        } else {
+          ;(chrome.desktopCapture.chooseDesktopMedia as any)(['tab', 'audio'], callback)
+        }
+      } catch (e) {
+        reject(e as any)
+      }
+    })
+  })
+}
+
+async function getStreamIdForRecording(tabId: number): Promise<string> {
+  try {
+    return await getStreamIdForTab(tabId)
+  } catch (e: any) {
+    const message = e?.message || String(e)
+    bglog('tabCapture.getMediaStreamId failed; falling back to desktopCapture:', message)
+    if (!/not been invoked|activeTab|current page/i.test(message)) {
+      throw e
+    }
+    return await chooseDesktopStreamForTab(tabId)
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     if (msg?.type === 'START_RECORDING') {
@@ -209,7 +245,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           : meetSuffixFromUrl(tab?.url)
         const startedAt = typeof msg.startedAt === 'number' ? msg.startedAt : Date.now()
         await chrome.tabs.sendMessage(tabId, { type: 'RESET_TRANSCRIPT' }).catch(() => {})
-        const streamId = await getStreamIdForTab(tabId)
+        const streamId = await getStreamIdForRecording(tabId)
         const r = await postToOffscreen({
           type: 'OFFSCREEN_START',
           streamId,

@@ -200,7 +200,7 @@ function showRecordingPrompt(suffix: string) {
   title.textContent = 'Record this Google Meet?'
   title.style.cssText = 'font-weight:600;font-size:14px;margin-bottom:6px'
   const detail = document.createElement('div')
-  detail.textContent = 'The extension will save a local recording and captions for Vexa notes. Turn on Meet captions for speaker normalization.'
+  detail.textContent = 'The extension will save a local recording and captions for Vexa notes. If Chrome opens a picker, choose this Meet tab and share audio.'
   detail.style.cssText = 'line-height:1.35;color:#5f6368;margin-bottom:12px'
 
   const actions = document.createElement('div')
