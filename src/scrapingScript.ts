@@ -4,6 +4,23 @@ let stopEl: HTMLButtonElement | null = null
 let currentRecording: { suffix: string; startedAt: number } | null = null
 let stopping = false
 
+function extensionContextValid(): boolean {
+  try {
+    return !!chrome?.runtime?.id
+  } catch {
+    return false
+  }
+}
+
+async function sendRuntimeMessage(message: any): Promise<any> {
+  if (!extensionContextValid()) return { ok: false, error: 'extension context invalidated' }
+  try {
+    return await chrome.runtime.sendMessage(message)
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
 interface Chunk {
   startTime: number
   endTime: number
@@ -126,7 +143,7 @@ new MutationObserver(() => {
     transcript.length = 0
   }
   
-  chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (extensionContextValid()) chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     if (msg?.type === 'GET_TRANSCRIPT') {
       ;[...prior.keys()].forEach(commit)
       sendResponse({ transcript: transcript.join('\n') })
@@ -194,7 +211,7 @@ async function stopRecordingFromPage(reason: string) {
     stopEl.disabled = true
     stopEl.textContent = 'Stopping...'
   }
-  await chrome.runtime.sendMessage({ type: 'STOP_RECORDING', reason }).catch((e) => ({ ok: false, error: String(e) }))
+  await sendRuntimeMessage({ type: 'STOP_RECORDING', reason })
   currentRecording = null
   stopEl?.remove()
   stopEl = null
@@ -301,7 +318,7 @@ checkForMeet()
 
 window.addEventListener('pagehide', () => {
   if (currentRecording) {
-    chrome.runtime.sendMessage({ type: 'STOP_RECORDING', reason: 'pagehide' }).catch(() => {})
+    void sendRuntimeMessage({ type: 'STOP_RECORDING', reason: 'pagehide' })
   }
 })
 
