@@ -161,6 +161,9 @@ let chunks: BlobPart[] = []
 let capturing = false
 let currentFilename = ''
 let activeStreams: MediaStream[] = []
+let stopCompletion: Promise<void> | null = null
+let resolveStopCompletion: (() => void) | null = null
+let rejectStopCompletion: ((error: Error) => void) | null = null
 
 function releaseActiveStreams() {
   for (const stream of activeStreams) {
@@ -229,6 +232,10 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
   }
 
   chunks = []
+  stopCompletion = new Promise<void>((resolve, reject) => {
+    resolveStopCompletion = resolve
+    rejectStopCompletion = reject
+  })
   const mime = AUDIO_ONLY_RECORDING && MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
     ? 'audio/webm;codecs=opus'
     : MediaRecorder.isTypeSupported('video/webm;codecs=vp8,opus')
@@ -258,7 +265,9 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
       mediaRecorder = null
       capturing = false
       pushState(false)
-      reject(new Error(e?.name || 'MediaRecorder error'))
+      const error = new Error(e?.name || 'MediaRecorder error')
+      rejectStopCompletion?.(error)
+      reject(error)
     }
 
     mediaRecorder!.ondataavailable = (e: BlobEvent) => {
@@ -289,6 +298,10 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
         currentFilename = ''
         capturing = false
         pushState(false)
+        resolveStopCompletion?.()
+        stopCompletion = null
+        resolveStopCompletion = null
+        rejectStopCompletion = null
       }
     }
   })
@@ -310,13 +323,14 @@ async function startRecordingFromStreamId(streamId: string, source: 'tab' | 'des
   await prepareAndRecord(baseStream, currentFilename)
 }
 
-function stopRecording() {
+async function stopRecording() {
   if (!mediaRecorder || !capturing) {
     console.warn('[offscreen] Stop called but not recording')
     releaseActiveStreams()
     throw new Error('Not currently recording')
   }
   try { mediaRecorder.stop() } catch (e) { console.error('[offscreen] Stop error', e); throw e }
+  await (stopCompletion || Promise.resolve())
 }
 
 // port rpc
@@ -343,7 +357,7 @@ rpcPort.onMessage.addListener(async (msg: any) => {
     }
 
     if (msg?.type === 'OFFSCREEN_STOP') {
-      try { stopRecording(); return respond(msg, { ok: true }) }
+      try { await stopRecording(); return respond(msg, { ok: true }) }
       catch (e) { return respond(msg, { ok: false, error: String(e) }) }
     }
 
