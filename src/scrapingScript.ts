@@ -2,6 +2,7 @@ let transcript: string[] = []
 let promptEl: HTMLDivElement | null = null
 let stopEl: HTMLButtonElement | null = null
 let currentRecording: { suffix: string; startedAt: number } | null = null
+let stopping = false
 
 interface Chunk {
   startTime: number
@@ -164,15 +165,64 @@ function ensureStopButton() {
     'cursor:pointer',
   ].join(';')
   stopEl.addEventListener('click', async () => {
-    stopEl!.disabled = true
-    stopEl!.textContent = 'Stopping...'
-    await chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }).catch((e) => ({ ok: false, error: String(e) }))
-    currentRecording = null
-    stopEl?.remove()
-    stopEl = null
+    await stopRecordingFromPage('floating_stop_button')
   })
   document.documentElement.appendChild(stopEl)
 }
+
+async function stopRecordingFromPage(reason: string) {
+  if (stopping) return
+  stopping = true
+  if (stopEl) {
+    stopEl.disabled = true
+    stopEl.textContent = 'Stopping...'
+  }
+  await chrome.runtime.sendMessage({ type: 'STOP_RECORDING', reason }).catch((e) => ({ ok: false, error: String(e) }))
+  currentRecording = null
+  stopEl?.remove()
+  stopEl = null
+  stopping = false
+}
+
+function nodeLooksLikeLeaveControl(node: EventTarget | null): boolean {
+  const el = node instanceof Element ? node.closest('button,[role="button"],div[aria-label],span[aria-label]') : null
+  if (!el) return false
+  const label = [
+    el.getAttribute('aria-label') || '',
+    el.getAttribute('data-tooltip') || '',
+    el.getAttribute('title') || '',
+    el.textContent || '',
+  ].join(' ').toLowerCase()
+  return /\b(leave call|leave meeting|end call|hang up)\b/.test(label)
+}
+
+document.addEventListener('click', (event) => {
+  if (!currentRecording) return
+  if (nodeLooksLikeLeaveControl(event.target)) {
+    window.setTimeout(() => {
+      void stopRecordingFromPage('meet_leave_control_clicked')
+    }, 500)
+  }
+}, true)
+
+function looksLikePostCallScreen(): boolean {
+  if (!currentRecording) return false
+  const bodyText = (document.body?.innerText || '').toLowerCase()
+  if (/\b(you left the meeting|you've left the meeting|you left this meeting|return to home screen)\b/.test(bodyText)) {
+    return true
+  }
+  const visibleRejoin = Array.from(document.querySelectorAll<HTMLElement>('button,[role="button"]')).some((el) => {
+    const text = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase()
+    return /\b(rejoin|join again)\b/.test(text)
+  })
+  return visibleRejoin
+}
+
+setInterval(() => {
+  if (looksLikePostCallScreen()) {
+    void stopRecordingFromPage('meet_post_call_screen_detected')
+  }
+}, 1500)
 
 function showRecordingPrompt(suffix: string) {
   if (promptEl || currentRecording) return
@@ -249,7 +299,7 @@ checkForMeet()
 
 window.addEventListener('pagehide', () => {
   if (currentRecording) {
-    chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }).catch(() => {})
+    chrome.runtime.sendMessage({ type: 'STOP_RECORDING', reason: 'pagehide' }).catch(() => {})
   }
 })
 

@@ -171,6 +171,34 @@ function postToOffscreen(msg: any): Promise<any> {
   })
 }
 
+async function stopActiveRecording(reason: string, saveTranscript = true): Promise<{ ok: boolean; error?: string }> {
+  const rec = activeRecording
+  if (!rec && !lastKnownRecording) return { ok: true }
+
+  bglog('Stopping active recording:', reason)
+  if (rec && saveTranscript) {
+    const transcript = await saveTranscriptForTab(rec.tabId, rec.suffix, rec.startedAt)
+    bglog('saveTranscriptForTab response', transcript)
+  }
+
+  try {
+    await ensureOffscreen()
+    if (offscreenPort) {
+      const r = await postToOffscreen({ type: 'OFFSCREEN_STOP', reason })
+      bglog('postToOffscreen(OFFSCREEN_STOP) response', r)
+      if (r?.ok === false && !/not currently recording/i.test(String(r.error || ''))) {
+        return { ok: false, error: r.error || 'Failed to stop' }
+      }
+    }
+  } finally {
+    activeRecording = null
+    lastKnownRecording = false
+    setBadge(false)
+    chrome.runtime.sendMessage({ type: 'RECORDING_STATE', recording: false, reason }).catch(() => {})
+  }
+  return { ok: true }
+}
+
 // background side streamId helper
 type CaptureSource = 'tab' | 'desktop'
 type CaptureStream = { streamId: string; source: CaptureSource }
@@ -277,18 +305,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     if (msg?.type === 'STOP_RECORDING') {
       try {
-        await ensureOffscreen()
-        const rec = activeRecording
-        if (rec) {
-          const transcript = await saveTranscriptForTab(rec.tabId, rec.suffix, rec.startedAt)
-          bglog('saveTranscriptForTab response', transcript)
-        }
-        if (offscreenPort) {
-          const r = await postToOffscreen({ type: 'OFFSCREEN_STOP' })
-          bglog('postToOffscreen(OFFSCREEN_STOP) response', r)
-        }
-        activeRecording = null
-        sendResponse({ ok: true })
+        sendResponse(await stopActiveRecording(msg.reason || 'manual_stop'))
       } catch (e: any) {
         sendResponse({ ok: false, error: `STOP failed: ${e?.message || e}` })
       }
@@ -316,7 +333,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true
 })
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (activeRecording?.tabId === tabId) {
+    void stopActiveRecording('recorded_tab_removed', false)
+  }
+})
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (activeRecording?.tabId !== tabId) return
+  const nextUrl = changeInfo.url || tab.url || ''
+  if (nextUrl && !/^https:\/\/meet\.google\.com\//i.test(nextUrl)) {
+    void stopActiveRecording('recorded_tab_left_meet')
+  }
+})
+
+chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  if (activeRecording?.tabId === removedTabId) {
+    activeRecording.tabId = addedTabId
+  }
+})
+
 chrome.runtime.onSuspend?.addListener(async () => {
-  try { if (offscreenPort) await postToOffscreen({ type: 'OFFSCREEN_STOP' }) } catch {}
-  setBadge(false)
+  try { await stopActiveRecording('background_suspend', false) } catch {}
 })
