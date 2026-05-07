@@ -17,8 +17,6 @@ const speakerSelector = '.NWpY1d'
 const captionParent = '.nMcdL'
 let reminderEl: HTMLDivElement | null = null
 let recordingActive = false
-let recordingStartedAt = 0
-let postCallDetections = 0
 
 const normalize = (pre: string) =>
   pre.toLowerCase().replace(/[.,?!'"\u2019]/g, "").replace(/\s+/g, " ").trim()
@@ -82,27 +80,26 @@ function checkForMeetReminder() {
   if (suffix) showRecordingReminder(suffix)
 }
 
-function dispatchKeyboardShortcut(key: string, shiftKey = false) {
-  const eventInit: KeyboardEventInit = {
-    key,
-    code: `Key${key.toUpperCase()}`,
-    bubbles: true,
-    cancelable: true,
-    composed: true,
-    shiftKey,
-  }
-  document.dispatchEvent(new KeyboardEvent('keydown', eventInit))
-  document.body?.dispatchEvent(new KeyboardEvent('keydown', eventInit))
-  document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', eventInit))
-  document.dispatchEvent(new KeyboardEvent('keyup', eventInit))
-  document.body?.dispatchEvent(new KeyboardEvent('keyup', eventInit))
-  document.activeElement?.dispatchEvent(new KeyboardEvent('keyup', eventInit))
-}
-
 async function enableMeetCaptions() {
-  window.focus()
-  ;(document.activeElement as HTMLElement | null)?.blur?.()
-  dispatchKeyboardShortcut('c')
+  const controls = Array.from(document.querySelectorAll<HTMLElement>('button,[role="button"]'))
+  const captionsButton = controls.find((el) => {
+    const rect = el.getBoundingClientRect()
+    const style = getComputedStyle(el)
+    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
+    if (!visible) return false
+
+    const label = [
+      el.getAttribute('aria-label') || '',
+      el.getAttribute('data-tooltip') || '',
+      el.getAttribute('title') || '',
+      el.textContent || '',
+    ].join(' ').toLowerCase()
+
+    if (/\b(turn off|disable|hide)\b.*\bcaptions?\b/.test(label)) return false
+    return /\b(turn on|enable|show)\b.*\bcaptions?\b/.test(label) || /\bcaptions?\b.*\b(off|disabled)\b/.test(label)
+  })
+
+  captionsButton?.click()
 }
 
 function handleCaption(speakerKey: string, speakerName: string, rawText: string) {
@@ -201,12 +198,8 @@ try {
     if (msg?.type === 'RECORDING_STATE') {
       recordingActive = !!msg.recording
       if (recordingActive) {
-        recordingStartedAt = Date.now()
-        postCallDetections = 0
         endedSent = false
       } else {
-        recordingStartedAt = 0
-        postCallDetections = 0
         endedSent = false
       }
       sendResponse({ ok: true })
@@ -248,29 +241,6 @@ document.addEventListener('click', (event) => {
     window.setTimeout(() => void notifyMeetEnded('meet_leave_control_clicked'), 500)
   }
 }, true)
-
-function looksLikePostCallScreen(): boolean {
-  if (!recordingActive || Date.now() - recordingStartedAt < 10_000) return false
-  const bodyText = (document.body?.innerText || '').toLowerCase()
-  if (/\b(you left the meeting|you've left the meeting|you left this meeting|return to home screen)\b/.test(bodyText)) return true
-  return Array.from(document.querySelectorAll<HTMLElement>('button,[role="button"]')).some((el) => {
-    const rect = el.getBoundingClientRect()
-    const style = getComputedStyle(el)
-    const visible = rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none'
-    if (!visible) return false
-    const text = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase()
-    return /\b(rejoin|join again)\b/.test(text)
-  })
-}
-
-setInterval(() => {
-  if (looksLikePostCallScreen()) {
-    postCallDetections += 1
-    if (postCallDetections >= 2) void notifyMeetEnded('meet_post_call_screen_detected')
-  } else {
-    postCallDetections = 0
-  }
-}, 1500)
 
 setInterval(checkForMeetReminder, 1500)
 checkForMeetReminder()
