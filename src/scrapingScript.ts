@@ -79,6 +79,30 @@ function checkForMeetReminder() {
   if (suffix) showRecordingReminder(suffix)
 }
 
+function dispatchKeyboardShortcut(key: string, shiftKey = false) {
+  const eventInit: KeyboardEventInit = {
+    key,
+    code: `Key${key.toUpperCase()}`,
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    shiftKey,
+  }
+  document.dispatchEvent(new KeyboardEvent('keydown', eventInit))
+  document.body?.dispatchEvent(new KeyboardEvent('keydown', eventInit))
+  document.activeElement?.dispatchEvent(new KeyboardEvent('keydown', eventInit))
+  document.dispatchEvent(new KeyboardEvent('keyup', eventInit))
+  document.body?.dispatchEvent(new KeyboardEvent('keyup', eventInit))
+  document.activeElement?.dispatchEvent(new KeyboardEvent('keyup', eventInit))
+}
+
+async function enableMeetCaptions() {
+  window.focus()
+  ;(document.activeElement as HTMLElement | null)?.blur?.()
+  dispatchKeyboardShortcut('c')
+  window.setTimeout(() => dispatchKeyboardShortcut('c', true), 350)
+}
+
 function handleCaption(speakerKey: string, speakerName: string, rawText: string) {
   const text = rawText.trim()
   if (!text) return
@@ -164,6 +188,11 @@ try {
     }
     if (msg?.type === 'RESET_TRANSCRIPT') {
       resetTranscript()
+      sendResponse({ ok: true })
+      return true
+    }
+    if (msg?.type === 'ENABLE_CAPTIONS') {
+      void enableMeetCaptions()
       sendResponse({ ok: true })
       return true
     }

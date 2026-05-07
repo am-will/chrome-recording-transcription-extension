@@ -160,6 +160,10 @@ startBtn?.addEventListener('click', async () => {
     await chrome.tabs.sendMessage(tab.id, { type: 'RESET_TRANSCRIPT' }).catch(() => {
       // if not on a Google Meet page yet, the transcript will just be empty later.
     });
+    await chrome.tabs.sendMessage(tab.id, { type: 'ENABLE_CAPTIONS' }).catch(() => {
+      // Captions are best-effort; recording should still start if Meet ignores the shortcut.
+    });
+    await new Promise(resolve => setTimeout(resolve, 500));
 
     const resp = await chrome.runtime.sendMessage({ type: 'START_RECORDING', tabId: tab.id });
     if (!resp) throw new Error('No response from background');
