@@ -11,6 +11,15 @@ function setBadge(recording: boolean) {
   chrome.action.setBadgeText({ text: recording ? 'REC' : '' }).catch?.(() => {})
 }
 
+function clearRecordingState(reason: string) {
+  activeRecording = null
+  lastKnownRecording = false
+  setBadge(false)
+  chrome.runtime.sendMessage({ type: 'RECORDING_STATE', recording: false, reason }).catch(() => {})
+}
+
+clearRecordingState('background_loaded')
+
 function meetSuffixFromUrl(url?: string | null): string {
   try {
     if (!url) return 'google-meet'
@@ -125,6 +134,7 @@ chrome.runtime.onConnect.addListener((port) => {
           })
           activeRecording = null
         }
+        clearRecordingState('offscreen_save_started')
         chrome.downloads.download({ url: msg.blobUrl, filename, saveAs: false }, () => {
           if (chrome.runtime.lastError) {
             bglog('downloads.download error:', chrome.runtime.lastError.message)
@@ -191,10 +201,7 @@ async function stopActiveRecording(reason: string, saveTranscript = true): Promi
       }
     }
   } finally {
-    activeRecording = null
-    lastKnownRecording = false
-    setBadge(false)
-    chrome.runtime.sendMessage({ type: 'RECORDING_STATE', recording: false, reason }).catch(() => {})
+    clearRecordingState(reason)
   }
   return { ok: true }
 }
