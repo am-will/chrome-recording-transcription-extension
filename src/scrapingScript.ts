@@ -113,4 +113,51 @@ try {
   // Existing Meet tabs can retain stale content scripts after extension reload.
 }
 
+let endedSent = false
+
+async function notifyMeetEnded(reason: string) {
+  if (endedSent) return
+  endedSent = true
+  try {
+    await chrome.runtime.sendMessage({ type: 'MEET_ENDED', reason })
+  } catch {
+    // Existing Meet tabs can retain stale content scripts after extension reload.
+  }
+}
+
+function nodeLooksLikeLeaveControl(node: EventTarget | null): boolean {
+  const el = node instanceof Element ? node.closest('button,[role="button"],div[aria-label],span[aria-label]') : null
+  if (!el) return false
+  const label = [
+    el.getAttribute('aria-label') || '',
+    el.getAttribute('data-tooltip') || '',
+    el.getAttribute('title') || '',
+    el.textContent || '',
+  ].join(' ').toLowerCase()
+  return /\b(leave call|leave meeting|end call|hang up)\b/.test(label)
+}
+
+document.addEventListener('click', (event) => {
+  if (nodeLooksLikeLeaveControl(event.target)) {
+    window.setTimeout(() => void notifyMeetEnded('meet_leave_control_clicked'), 500)
+  }
+}, true)
+
+function looksLikePostCallScreen(): boolean {
+  const bodyText = (document.body?.innerText || '').toLowerCase()
+  if (/\b(you left the meeting|you've left the meeting|you left this meeting|return to home screen)\b/.test(bodyText)) return true
+  return Array.from(document.querySelectorAll<HTMLElement>('button,[role="button"]')).some((el) => {
+    const text = `${el.textContent || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase()
+    return /\b(rejoin|join again)\b/.test(text)
+  })
+}
+
+setInterval(() => {
+  if (looksLikePostCallScreen()) void notifyMeetEnded('meet_post_call_screen_detected')
+}, 1500)
+
+window.addEventListener('pagehide', () => {
+  void notifyMeetEnded('pagehide')
+})
+
 console.log('Transcript collector ready')

@@ -348,6 +348,15 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       sendResponse(await saveTranscriptForTab(tabId, suffix, startedAt))
       return
     }
+
+    if (msg?.type === 'MEET_ENDED') {
+      if (_sender.tab?.id && activeRecording?.tabId === _sender.tab.id) {
+        sendResponse(await stopActiveRecording(msg.reason || 'meet_ended'))
+      } else {
+        sendResponse({ ok: true, ignored: true })
+      }
+      return
+    }
   })().catch((err) => {
     console.error('[background] top-level error', err)
     sendResponse({ ok: false, error: String(err) })
