@@ -3,7 +3,7 @@
 let offscreenPort: chrome.runtime.Port | null = null
 let offscreenReady = false
 let lastKnownRecording = false
-let activeRecording: { tabId: number; suffix: string; startedAt: number } | null = null
+let activeRecording: { tabId: number; suffix: string; startedAt: number; transcriptSaved?: boolean } | null = null
 
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms))
 function bglog(...a: any[]) { console.log('[background]', ...a) }
@@ -69,6 +69,14 @@ async function saveTranscriptForTab(tabId: number, suffix: string, startedAt: nu
   } catch (e: any) {
     return { ok: false, error: e?.message || String(e) }
   }
+}
+
+async function saveActiveTranscriptOnce(): Promise<{ ok: boolean; filename?: string; error?: string; skipped?: boolean }> {
+  const rec = activeRecording
+  if (!rec) return { ok: false, skipped: true, error: 'no active recording' }
+  if (rec.transcriptSaved) return { ok: true, skipped: true }
+  rec.transcriptSaved = true
+  return await saveTranscriptForTab(rec.tabId, rec.suffix, rec.startedAt)
 }
 
 async function hasOffscreenContext(): Promise<boolean> {
@@ -142,10 +150,9 @@ chrome.runtime.onConnect.addListener((port) => {
         bglog('Saving OFFSCREEN_SAVE via blobUrl', filename)
         const rec = activeRecording
         if (rec) {
-          void saveTranscriptForTab(rec.tabId, rec.suffix, rec.startedAt).then((result) => {
+          void saveActiveTranscriptOnce().then((result) => {
             bglog('auto saveTranscriptForTab response', result)
           })
-          activeRecording = null
         }
         clearRecordingState('offscreen_save_started')
         chrome.downloads.download({ url: msg.blobUrl, filename, saveAs: false }, () => {
@@ -201,7 +208,7 @@ async function stopActiveRecording(reason: string, saveTranscript = true): Promi
 
   bglog('Stopping active recording:', reason)
   if (rec && saveTranscript) {
-    const transcript = await saveTranscriptForTab(rec.tabId, rec.suffix, rec.startedAt)
+    const transcript = await saveActiveTranscriptOnce()
     bglog('saveTranscriptForTab response', transcript)
   }
 
@@ -311,7 +318,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
         if (r?.ok) {
           lastKnownRecording = true
-          activeRecording = { tabId, suffix, startedAt }
+          activeRecording = { tabId, suffix, startedAt, transcriptSaved: false }
           setBadge(true)
           chrome.runtime.sendMessage({ type: 'RECORDING_STATE', recording: true, suffix, startedAt }).catch(() => {})
           chrome.tabs.sendMessage(tabId, { type: 'RECORDING_STATE', recording: true, suffix, startedAt }).catch(() => {})
