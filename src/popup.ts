@@ -160,13 +160,29 @@ startBtn?.addEventListener('click', async () => {
     await chrome.tabs.sendMessage(tab.id, { type: 'RESET_TRANSCRIPT' }).catch(() => {
       // if not on a Google Meet page yet, the transcript will just be empty later.
     });
-
     const resp = await chrome.runtime.sendMessage({ type: 'START_RECORDING', tabId: tab.id });
     if (!resp) throw new Error('No response from background');
     if (resp.ok === false) throw new Error(resp.error || 'Failed to start');
 
     setUI(true);
     toast('Recording started');
+
+    setTimeout(() => {
+      chrome.tabs.sendMessage(tab.id!, { type: 'ENABLE_CAPTIONS' }).then((captionResp) => {
+        if (captionResp?.ok === false) {
+          return chrome.runtime.sendMessage({ type: 'ENABLE_CAPTIONS_DEBUGGER', tabId: tab.id }).then((fallbackResp) => {
+            if (fallbackResp?.ok === false) toast(`Captions not enabled: ${fallbackResp.error || captionResp.error || 'control not found'}`);
+          });
+        }
+        return undefined;
+      }).catch(() => {
+        chrome.runtime.sendMessage({ type: 'ENABLE_CAPTIONS_DEBUGGER', tabId: tab.id }).then((fallbackResp) => {
+          if (fallbackResp?.ok === false) toast(`Captions not enabled: ${fallbackResp.error || 'content script unavailable'}`);
+        }).catch(() => {
+          toast('Captions not enabled: content script unavailable');
+        });
+      });
+    }, 1200);
   } catch (e: any) {
     console.error('[popup] START_RECORDING error', e);
     setUI(false);

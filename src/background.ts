@@ -3,11 +3,106 @@
 let offscreenPort: chrome.runtime.Port | null = null
 let offscreenReady = false
 let lastKnownRecording = false
+let activeRecording: { tabId: number; suffix: string; startedAt: number; transcriptSaved?: boolean } | null = null
 
 const wait = (ms: number) => new Promise(r => setTimeout(r, ms))
 function bglog(...a: any[]) { console.log('[background]', ...a) }
 function setBadge(recording: boolean) {
   chrome.action.setBadgeText({ text: recording ? 'REC' : '' }).catch?.(() => {})
+}
+
+function clearRecordingState(reason: string) {
+  activeRecording = null
+  lastKnownRecording = false
+  setBadge(false)
+  chrome.runtime.sendMessage({ type: 'RECORDING_STATE', recording: false, reason }).catch(() => {})
+}
+
+clearRecordingState('background_loaded')
+
+async function closeOffscreenIfIdle(): Promise<void> {
+  try {
+    if (await hasOffscreenContext()) {
+      await chrome.offscreen.closeDocument()
+    }
+  } catch (e) {
+    bglog('closeOffscreenIfIdle failed/non-fatal:', e)
+  } finally {
+    offscreenPort = null
+    offscreenReady = false
+  }
+}
+
+function meetSuffixFromUrl(url?: string | null): string {
+  try {
+    if (!url) return 'google-meet'
+    const u = new URL(url)
+    return u.pathname.split('/').filter(Boolean).pop() || 'google-meet'
+  } catch {
+    return 'google-meet'
+  }
+}
+
+function artifactFilename(kind: 'recording' | 'transcript', suffix: string, startedAt: number): string {
+  const ext = kind === 'recording' ? 'webm' : 'txt'
+  return `vexa-meet-recordings/google-meet-${kind}-${suffix}-${startedAt}.${ext}`
+}
+
+async function pressCaptionsShortcutWithDebugger(tabId: number): Promise<{ ok: boolean; error?: string }> {
+  const target = { tabId }
+  try {
+    await chrome.debugger.attach(target, '1.3')
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      key: 'c',
+      code: 'KeyC',
+      windowsVirtualKeyCode: 67,
+      nativeVirtualKeyCode: 67,
+    })
+    await chrome.debugger.sendCommand(target, 'Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      key: 'c',
+      code: 'KeyC',
+      windowsVirtualKeyCode: 67,
+      nativeVirtualKeyCode: 67,
+    })
+    return { ok: true }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) }
+  } finally {
+    try { await chrome.debugger.detach(target) } catch {}
+  }
+}
+
+async function saveTranscriptForTab(tabId: number, suffix: string, startedAt: number): Promise<{ ok: boolean; filename?: string; error?: string }> {
+  try {
+    const res = await chrome.tabs.sendMessage(tabId, { type: 'GET_TRANSCRIPT' }).catch((e) => ({ error: String(e) }))
+    const transcript = (res as any)?.transcript as string | undefined
+    if (!transcript?.trim()) return { ok: false, error: 'empty transcript' }
+
+    const header = [
+      `# Google Meet caption transcript`,
+      `meeting_suffix: ${suffix}`,
+      `recording_started_at_ms: ${startedAt}`,
+      `saved_at: ${new Date().toISOString()}`,
+      ``,
+    ].join('\n')
+    const dataUrl = `data:text/plain;charset=utf-8,${encodeURIComponent(header + transcript.trim() + '\n')}`
+    const filename = artifactFilename('transcript', suffix, startedAt)
+    await chrome.downloads.download({ url: dataUrl, filename, saveAs: false })
+    chrome.runtime.sendMessage({ type: 'TRANSCRIPT_SAVED', filename }).catch(() => {})
+    return { ok: true, filename }
+  } catch (e: any) {
+    return { ok: false, error: e?.message || String(e) }
+  }
+}
+
+async function saveActiveTranscriptOnce(): Promise<{ ok: boolean; filename?: string; error?: string; skipped?: boolean }> {
+  const rec = activeRecording
+  if (!rec) return { ok: false, skipped: true, error: 'no active recording' }
+  if (rec.transcriptSaved) return { ok: true, skipped: true }
+  rec.transcriptSaved = true
+  return await saveTranscriptForTab(rec.tabId, rec.suffix, rec.startedAt)
 }
 
 async function hasOffscreenContext(): Promise<boolean> {
@@ -79,7 +174,14 @@ chrome.runtime.onConnect.addListener((port) => {
 
       if (msg.blobUrl) {
         bglog('Saving OFFSCREEN_SAVE via blobUrl', filename)
-        chrome.downloads.download({ url: msg.blobUrl, filename, saveAs: true }, () => {
+        const rec = activeRecording
+        if (rec) {
+          void saveActiveTranscriptOnce().then((result) => {
+            bglog('auto saveTranscriptForTab response', result)
+          })
+        }
+        clearRecordingState('offscreen_save_started')
+        chrome.downloads.download({ url: msg.blobUrl, filename, saveAs: false }, () => {
           if (chrome.runtime.lastError) {
             bglog('downloads.download error:', chrome.runtime.lastError.message)
           } else {
@@ -87,6 +189,7 @@ chrome.runtime.onConnect.addListener((port) => {
           }
           setTimeout(() => {
             try { offscreenPort?.postMessage({ type: 'REVOKE_BLOB_URL', blobUrl: msg.blobUrl }) } catch {}
+            void closeOffscreenIfIdle()
           }, 10_000)
         })
         return
@@ -125,15 +228,44 @@ function postToOffscreen(msg: any): Promise<any> {
   })
 }
 
+async function stopActiveRecording(reason: string, saveTranscript = true): Promise<{ ok: boolean; error?: string }> {
+  const rec = activeRecording
+  if (!rec && !lastKnownRecording) return { ok: true }
+
+  bglog('Stopping active recording:', reason)
+  if (rec && saveTranscript) {
+    const transcript = await saveActiveTranscriptOnce()
+    bglog('saveTranscriptForTab response', transcript)
+  }
+
+  try {
+    await ensureOffscreen()
+    if (offscreenPort) {
+      const r = await postToOffscreen({ type: 'OFFSCREEN_STOP', reason })
+      bglog('postToOffscreen(OFFSCREEN_STOP) response', r)
+      if (r?.ok === false && !/not currently recording/i.test(String(r.error || ''))) {
+        return { ok: false, error: r.error || 'Failed to stop' }
+      }
+    }
+  } finally {
+    clearRecordingState(reason)
+    await closeOffscreenIfIdle()
+  }
+  return { ok: true }
+}
+
 // background side streamId helper
-function getStreamIdForTab(tabId: number): Promise<string> {
+type CaptureSource = 'tab' | 'desktop'
+type CaptureStream = { streamId: string; source: CaptureSource }
+
+function getStreamIdForTab(tabId: number): Promise<CaptureStream> {
   return new Promise((resolve, reject) => {
     try {
       chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id?: string) => {
         const err = chrome.runtime.lastError
         if (err) return reject(new Error(err.message))
         if (!id) return reject(new Error('Empty streamId'))
-        resolve(id)
+        resolve({ streamId: id, source: 'tab' })
       })
     } catch (e) {
       reject(e as any)
@@ -141,12 +273,48 @@ function getStreamIdForTab(tabId: number): Promise<string> {
   })
 }
 
+function chooseDesktopStreamForTab(tabId: number): Promise<CaptureStream> {
+  return new Promise((resolve, reject) => {
+    chrome.tabs.get(tabId, (tab) => {
+      const targetTab = chrome.runtime.lastError ? undefined : tab
+      try {
+        const callback = (streamId: string) => {
+          const err = chrome.runtime.lastError
+          if (err) return reject(new Error(err.message))
+          if (!streamId) return reject(new Error('Capture picker was cancelled'))
+          resolve({ streamId, source: 'desktop' })
+        }
+        if (targetTab) {
+          chrome.desktopCapture.chooseDesktopMedia(['tab', 'audio'], targetTab, callback)
+        } else {
+          ;(chrome.desktopCapture.chooseDesktopMedia as any)(['tab', 'audio'], callback)
+        }
+      } catch (e) {
+        reject(e as any)
+      }
+    })
+  })
+}
+
+async function getStreamIdForRecording(tabId: number): Promise<CaptureStream> {
+  try {
+    return await getStreamIdForTab(tabId)
+  } catch (e: any) {
+    const message = e?.message || String(e)
+    bglog('tabCapture.getMediaStreamId failed; falling back to desktopCapture:', message)
+    if (!/not been invoked|activeTab|current page/i.test(message)) {
+      throw e
+    }
+    return await chooseDesktopStreamForTab(tabId)
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     if (msg?.type === 'START_RECORDING') {
-      const tabId: number | undefined = msg.tabId
+      const tabId: number | undefined = msg.tabId ?? _sender.tab?.id
       if (typeof tabId !== 'number') { sendResponse({ ok: false, error: 'Missing tabId' }); return }
-      bglog('Popup requested START_RECORDING for tabId', tabId)
+      bglog('Requested START_RECORDING for tabId', tabId)
 
       try {
         await ensureOffscreen()
@@ -157,15 +325,30 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       }
 
       try {
-        const streamId = await getStreamIdForTab(tabId)
-        const r = await postToOffscreen({ type: 'OFFSCREEN_START', streamId })
+        const tab = await chrome.tabs.get(tabId).catch(() => undefined)
+        const suffix = typeof msg.suffix === 'string' && msg.suffix.trim()
+          ? msg.suffix.trim()
+          : meetSuffixFromUrl(tab?.url)
+        const startedAt = typeof msg.startedAt === 'number' ? msg.startedAt : Date.now()
+        await chrome.tabs.sendMessage(tabId, { type: 'RESET_TRANSCRIPT' }).catch(() => {})
+        const capture = await getStreamIdForRecording(tabId)
+        const r = await postToOffscreen({
+          type: 'OFFSCREEN_START',
+          streamId: capture.streamId,
+          captureSource: capture.source,
+          suffix,
+          startedAt,
+          filename: artifactFilename('recording', suffix, startedAt),
+        })
         bglog('postToOffscreen(OFFSCREEN_START) response', r)
 
         if (r?.ok) {
           lastKnownRecording = true
+          activeRecording = { tabId, suffix, startedAt, transcriptSaved: false }
           setBadge(true)
-          chrome.runtime.sendMessage({ type: 'RECORDING_STATE', recording: true }).catch(() => {})
-          sendResponse({ ok: true })
+          chrome.runtime.sendMessage({ type: 'RECORDING_STATE', recording: true, suffix, startedAt }).catch(() => {})
+          chrome.tabs.sendMessage(tabId, { type: 'RECORDING_STATE', recording: true, suffix, startedAt }).catch(() => {})
+          sendResponse({ ok: true, suffix, startedAt })
         } else {
           sendResponse({ ok: false, error: r?.error || 'Failed to start' })
         }
@@ -178,12 +361,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
     if (msg?.type === 'STOP_RECORDING') {
       try {
-        await ensureOffscreen()
-        if (offscreenPort) {
-          const r = await postToOffscreen({ type: 'OFFSCREEN_STOP' })
-          bglog('postToOffscreen(OFFSCREEN_STOP) response', r)
-        }
-        sendResponse({ ok: true })
+        sendResponse(await stopActiveRecording(msg.reason || 'manual_stop'))
       } catch (e: any) {
         sendResponse({ ok: false, error: `STOP failed: ${e?.message || e}` })
       }
@@ -191,7 +369,32 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
 
     if (msg?.type === 'GET_RECORDING_STATUS') {
-      sendResponse({ recording: lastKnownRecording })
+      sendResponse({ recording: lastKnownRecording, activeRecording })
+      return
+    }
+
+    if (msg?.type === 'ENABLE_CAPTIONS_DEBUGGER') {
+      const tabId: number | undefined = msg.tabId ?? _sender.tab?.id ?? activeRecording?.tabId
+      if (typeof tabId !== 'number') { sendResponse({ ok: false, error: 'Missing tabId' }); return }
+      sendResponse(await pressCaptionsShortcutWithDebugger(tabId))
+      return
+    }
+
+    if (msg?.type === 'SAVE_TRANSCRIPT') {
+      const tabId: number | undefined = msg.tabId ?? _sender.tab?.id ?? activeRecording?.tabId
+      const suffix = String(msg.suffix || activeRecording?.suffix || 'google-meet')
+      const startedAt = Number(msg.startedAt || activeRecording?.startedAt || Date.now())
+      if (typeof tabId !== 'number') { sendResponse({ ok: false, error: 'Missing tabId' }); return }
+      sendResponse(await saveTranscriptForTab(tabId, suffix, startedAt))
+      return
+    }
+
+    if (msg?.type === 'MEET_ENDED') {
+      if (_sender.tab?.id && activeRecording?.tabId === _sender.tab.id) {
+        sendResponse(await stopActiveRecording(msg.reason || 'meet_ended'))
+      } else {
+        sendResponse({ ok: true, ignored: true })
+      }
       return
     }
   })().catch((err) => {
@@ -202,7 +405,26 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   return true
 })
 
+chrome.tabs.onRemoved.addListener((tabId) => {
+  if (activeRecording?.tabId === tabId) {
+    void stopActiveRecording('recorded_tab_removed', false)
+  }
+})
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (activeRecording?.tabId !== tabId) return
+  const nextUrl = changeInfo.url || tab.url || ''
+  if (nextUrl && !/^https:\/\/meet\.google\.com\//i.test(nextUrl)) {
+    void stopActiveRecording('recorded_tab_left_meet')
+  }
+})
+
+chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  if (activeRecording?.tabId === removedTabId) {
+    activeRecording.tabId = addedTabId
+  }
+})
+
 chrome.runtime.onSuspend?.addListener(async () => {
-  try { if (offscreenPort) await postToOffscreen({ type: 'OFFSCREEN_STOP' }) } catch {}
-  setBadge(false)
+  try { await stopActiveRecording('background_suspend', false) } catch {}
 })
