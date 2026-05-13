@@ -52,9 +52,7 @@ function inferSuffixFromActiveTabUrl(url?: string | null): string {
 // simple 1-channel RMS meter for debugging
 function attachRmsMeter(track: MediaStreamTrack, label: 'RAW' | 'FINAL') {
   try {
-    const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
-    const ctx = new AC()
-    void ctx.resume().catch(() => {})
+    const ctx = createAudioContext()
     const src = ctx.createMediaStreamSource(new MediaStream([track]))
     const analyser = ctx.createAnalyser()
     analyser.fftSize = 256
@@ -101,9 +99,7 @@ function mixAudio(tabStream: MediaStream, micStream: MediaStream | null): MediaS
   const tabAudio = tabStream.getAudioTracks()[0]
   if (!micStream || !tabAudio) return tabStream
 
-  const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
-  const ctx = new AC()
-  void ctx.resume().catch(() => {})
+  const ctx = createAudioContext()
   const dst = ctx.createMediaStreamDestination()
 
   try {
@@ -161,15 +157,41 @@ let chunks: BlobPart[] = []
 let capturing = false
 let currentFilename = ''
 let activeStreams: MediaStream[] = []
+let activeAudioContexts: AudioContext[] = []
 let stopCompletion: Promise<void> | null = null
 let resolveStopCompletion: (() => void) | null = null
 let rejectStopCompletion: ((error: Error) => void) | null = null
+
+function createAudioContext(): AudioContext {
+  const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
+  const ctx = new AC()
+  activeAudioContexts.push(ctx)
+  void ctx.resume().catch(() => {})
+  return ctx
+}
 
 function releaseActiveStreams() {
   for (const stream of activeStreams) {
     try { stream.getTracks().forEach(t => t.stop()) } catch {}
   }
   activeStreams = []
+  for (const ctx of activeAudioContexts) {
+    try { void ctx.close().catch(() => {}) } catch {}
+  }
+  activeAudioContexts = []
+}
+
+function monitorTabAudio(tabStream: MediaStream) {
+  const tabAudio = tabStream.getAudioTracks()[0]
+  if (!tabAudio) return
+  try {
+    const ctx = createAudioContext()
+    const source = ctx.createMediaStreamSource(new MediaStream([tabAudio]))
+    source.connect(ctx.destination)
+    log('tab audio monitor connected to local output')
+  } catch (e) {
+    log('tab audio monitor setup failed; recording can continue but local playback may be muted', e)
+  }
 }
 
 async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: string): Promise<void> {
@@ -197,6 +219,7 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
   // debug meters
   const rawAudio = baseStream.getAudioTracks()[0]
   if (rawAudio) attachRmsMeter(rawAudio, 'RAW')
+  monitorTabAudio(baseStream)
 
   const micStream = await maybeGetMicStream()
   const mixedStream = mixAudio(baseStream, micStream)
@@ -211,8 +234,7 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
   // safety check, not fatal
   if (rawAudio) {
     try {
-      const AC = (window.AudioContext || (window as any).webkitAudioContext) as typeof AudioContext
-      const ctx = new AC()
+      const ctx = createAudioContext()
       await ctx.resume().catch(() => {})
       const src = ctx.createMediaStreamSource(new MediaStream([rawAudio]))
       const analyser = ctx.createAnalyser()
@@ -228,6 +250,8 @@ async function prepareAndRecord(baseStream: MediaStream, requestedFilename?: str
       }
       const rms = Math.sqrt(sum / buf.length)
       if (rms < 0.005) log('no audio energy detected before start')
+      try { await ctx.close() } catch {}
+      activeAudioContexts = activeAudioContexts.filter(activeCtx => activeCtx !== ctx)
     } catch {}
   }
 
